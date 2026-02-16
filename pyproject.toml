@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kinetimesh"
+version = "0.1.0"
+description = "Living mesh of code context - instant-sync semantic search for agentic LLM coding tools"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+    "lancedb>=0.15.0",
+    "sentence-transformers>=3.0.0",
+    "tree-sitter>=0.23.0",
+    "tree-sitter-python>=0.23.0",
+    "tree-sitter-javascript>=0.23.0",
+    "tree-sitter-typescript>=0.23.0",
+    "watchdog>=4.0.0",
+    "mcp>=1.0.0",
+    "flashrank>=0.2.0",
+    "pydantic>=2.0.0",
+    "tantivy>=0.22.0",
+    "tqdm>=4.66.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+# ONNX backend for 1.5-3x embedding speedup. Currently blocked by
+# optimum <-> transformers v5 version conflict. Will be available
+# when optimum adds transformers v5 support.
+fast = [
+    "onnxruntime>=1.18.0",
+]
+
+[project.scripts]
+kmesh = "src.server.mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: Real-repo tests requiring network access and significant time",
+    "stress: Large-repo stress tests (FastAPI ~2800 files)",
+    "benchmark: Performance benchmark tests",
+]
+addopts = "-m 'not slow and not stress and not benchmark'"

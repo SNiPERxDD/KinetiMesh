@@ -1,0 +1,42 @@
+# KinetiMesh runtime data
+.kmesh*/
+
+# Legacy data directories (pre-rebrand)
+.turbo*/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Dumps
+dumps/
+
+# Deleted files (for safe archival)
+deleted/
+
+# Frankenreview artifacts
+.frankenreview/
+
+# Test repo clones
+/tmp/kmesh_*
