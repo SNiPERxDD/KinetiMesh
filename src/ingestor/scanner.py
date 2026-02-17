@@ -177,6 +177,11 @@ class MeshIngestor:
     def _get_git_ignored(self) -> Set[str]:
         """Return set of gitignored file paths relative to repo root."""
         ignored: Set[str] = set()
+        
+        # Check if this is a git repository first to avoid subprocess hang
+        if not (self.root / ".git").exists():
+            return ignored
+        
         try:
             out = subprocess.check_output(
                 [
@@ -258,26 +263,32 @@ class MeshIngestor:
     def _recursive_collect(
         self, current_dir: Path, candidates: List[Tuple[Path, str]]
     ) -> None:
-        """Recursively collect file candidates using os.scandir.
+        """Iteratively collect file candidates using stack-based traversal.
+        
+        Prevents RecursionError on deep directory structures.
 
         Args:
             current_dir: Directory to scan.
             candidates: Accumulator list for (abs_path, rel_path) tuples.
         """
-        try:
-            with os.scandir(current_dir) as scanner:
-                for entry in scanner:
-                    if entry.is_dir(follow_symlinks=False):
-                        if self._should_skip_dir(entry.name):
-                            continue
-                        self._recursive_collect(Path(entry.path), candidates)
-                    elif entry.is_file(follow_symlinks=False):
-                        fpath = Path(entry.path)
-                        rel_path = str(fpath.relative_to(self.root))
-                        if not self._should_skip_file(entry, rel_path):
-                            candidates.append((fpath, rel_path))
-        except (PermissionError, FileNotFoundError, OSError):
-            pass
+        # Use explicit stack instead of recursion to prevent stack overflow
+        dirs_to_scan = [current_dir]
+        
+        while dirs_to_scan:
+            scan_dir = dirs_to_scan.pop()
+            try:
+                with os.scandir(scan_dir) as scanner:
+                    for entry in scanner:
+                        if entry.is_dir(follow_symlinks=False):
+                            if not self._should_skip_dir(entry.name):
+                                dirs_to_scan.append(Path(entry.path))
+                        elif entry.is_file(follow_symlinks=False):
+                            fpath = Path(entry.path)
+                            rel_path = str(fpath.relative_to(self.root))
+                            if not self._should_skip_file(entry, rel_path):
+                                candidates.append((fpath, rel_path))
+            except (PermissionError, FileNotFoundError, OSError):
+                pass
 
     def scan(self, incremental: bool = True) -> Generator[CodeFile, None, None]:
         """Scan the repository and yield changed CodeFile objects.
@@ -327,7 +338,29 @@ class MeshIngestor:
                     size_bytes=len(content.encode("utf-8")),
                     line_count=line_count,
                 )
-            except (OSError, UnicodeDecodeError):
+            except (OSError, FileNotFoundError) as e:
+                # File disappeared during scan or permission denied
+                import logging
+                logger = logging.getLogger("kmesh.ingestor")
+                logger.debug(f"Skipping {rel_path}: {type(e).__name__}")
+                continue
+            except (UnicodeDecodeError, UnicodeError) as e:
+                # Encoding issues - skip file
+                import logging
+                logger = logging.getLogger("kmesh.ingestor")
+                logger.warning(f"Encoding error in {rel_path}: {str(e)[:100]}")
+                continue
+            except MemoryError:
+                # File too large to read into memory
+                import logging
+                logger = logging.getLogger("kmesh.ingestor")
+                logger.error(f"MemoryError reading {rel_path} - file too large")
+                continue
+            except Exception as e:
+                # Catch-all for unexpected errors
+                import logging
+                logger = logging.getLogger("kmesh.ingestor")
+                logger.error(f"Unexpected error reading {rel_path}: {type(e).__name__} - {str(e)}")
                 continue
 
         # Step 3: Clean up state for deleted files
@@ -379,7 +412,25 @@ class MeshIngestor:
                 size_bytes=len(content.encode("utf-8")),
                 line_count=line_count,
             )
-        except (OSError, UnicodeDecodeError):
+        except (OSError, FileNotFoundError) as e:
+            import logging
+            logger = logging.getLogger("kmesh.ingestor")
+            logger.debug(f"File read error {rel_path}: {type(e).__name__}")
+            return None
+        except (UnicodeDecodeError, UnicodeError) as e:
+            import logging
+            logger = logging.getLogger("kmesh.ingestor")
+            logger.warning(f"Encoding error in {rel_path}: {str(e)[:100]}")
+            return None
+        except MemoryError:
+            import logging
+            logger = logging.getLogger("kmesh.ingestor")
+            logger.error(f"MemoryError reading {rel_path}")
+            return None
+        except Exception as e:
+            import logging
+            logger = logging.getLogger("kmesh.ingestor")
+            logger.error(f"Unexpected error reading {rel_path}: {type(e).__name__}")
             return None
 
     def get_deleted_paths(self) -> List[str]:

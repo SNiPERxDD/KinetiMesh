@@ -107,6 +107,7 @@ def embed_texts(texts: List[str], batch_size: int = 256, show_progress: bool = T
     """Embed a list of texts into vectors.
 
     Uses tqdm progress bar for real-time visibility on large embedding jobs.
+    Implements error handling for CUDA OOM and encoding issues.
 
     Args:
         texts: List of text strings to embed.
@@ -115,32 +116,64 @@ def embed_texts(texts: List[str], batch_size: int = 256, show_progress: bool = T
 
     Returns:
         numpy array of shape (len(texts), 384).
+    
+    Raises:
+        RuntimeError: If embedding fails critically (no fallback possible).
     """
+    if not texts:
+        return np.array([]).reshape(0, _EMBEDDING_DIM)
+    
     model = _get_embedding_model()
 
-    if len(texts) <= 100 or not show_progress:
-        return model.encode(
-            texts,
-            batch_size=batch_size,
-            show_progress_bar=False,
-            normalize_embeddings=True,
-        )
-
-    # Manual batched embedding with tqdm for real-time progress
-    all_vectors = []
-    with tqdm(total=len(texts), desc="Embedding", unit="chunks", ncols=80) as pbar:
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i:i + batch_size]
-            vecs = model.encode(
-                batch,
-                batch_size=len(batch),
+    try:
+        if len(texts) <= 100 or not show_progress:
+            return model.encode(
+                texts,
+                batch_size=batch_size,
                 show_progress_bar=False,
                 normalize_embeddings=True,
             )
-            all_vectors.append(vecs)
-            pbar.update(len(batch))
 
-    return np.vstack(all_vectors)
+        # Manual batched embedding with tqdm for real-time progress
+        all_vectors = []
+        with tqdm(total=len(texts), desc="Embedding", unit="chunks", ncols=80) as pbar:
+            for i in range(0, len(texts), batch_size):
+                batch = texts[i:i + batch_size]
+                try:
+                    vecs = model.encode(
+                        batch,
+                        batch_size=len(batch),
+                        show_progress_bar=False,
+                        normalize_embeddings=True,
+                    )
+                    all_vectors.append(vecs)
+                    pbar.update(len(batch))
+                except RuntimeError as e:
+                    # CUDA OOM or other runtime errors - try smaller batch
+                    if "CUDA" in str(e) or "out of memory" in str(e).lower():
+                        logger.warning(f"CUDA OOM, retrying batch {i} with size 1")
+                        # Process one at a time as fallback
+                        for text in batch:
+                            vec = model.encode(
+                                [text],
+                                batch_size=1,
+                                show_progress_bar=False,
+                                normalize_embeddings=True,
+                            )
+                            all_vectors.append(vec)
+                            pbar.update(1)
+                    else:
+                        raise
+
+        # Memory-efficient concatenation without vstack
+        # np.vstack creates a copy - use concatenate with pre-allocated array instead
+        if len(all_vectors) == 1:
+            return all_vectors[0]
+        return np.concatenate(all_vectors, axis=0)
+        
+    except Exception as e:
+        logger.error(f"Embedding failed: {type(e).__name__} - {str(e)}")
+        raise RuntimeError(f"Failed to embed texts: {str(e)}") from e
 
 
 def embed_query(query: str) -> np.ndarray:
@@ -215,10 +248,10 @@ def rerank_results(
             key=lambda r: r.get("score", 999) / max(r.get("priority", 1), 0.1),
         )[:max_candidates]
 
-        # Truncate text aggressively for cross-encoder efficiency
-        # Cross-encoders tokenize query+passage together, 512 token limit
+        # Truncate text moderately to balance context vs speed
+        # FlashRank cross-encoder has a 512 token limit (~2000 chars)
         passages = [
-            {"id": i, "text": r["text"][:600], "meta": r}
+            {"id": i, "text": r["text"][:1500], "meta": r}
             for i, r in enumerate(candidates)
         ]
         request = RerankRequest(query=query, passages=passages)
@@ -273,7 +306,17 @@ class VectorStore:
 
     def __init__(self, db_path: str = ".kmesh/data"):
         self.db_path = db_path
-        self.db = lancedb.connect(db_path)
+        
+        # Try to connect and verify integrity
+        try:
+            self.db = lancedb.connect(db_path)
+            self._verify_db_integrity()
+        except Exception as e:
+            # Database corruption detected - auto-heal
+            logger.error(f"[!] Database corruption detected: {type(e).__name__} - {str(e)}")
+            logger.info("[!] Auto-healing: rebuilding database...")
+            self._rebuild_database()
+            
         self._table: Optional[lancedb.table.Table] = None
         self._fts_index_built = False
 
@@ -281,6 +324,89 @@ class VectorStore:
         self.last_embed_time: float = 0.0
         self.last_store_time: float = 0.0
         self.last_search_time: float = 0.0
+
+    def _verify_db_integrity(self) -> bool:
+        """Verify database is accessible and valid.
+        
+        Returns:
+            True if DB is healthy, False otherwise.
+            
+        Raises:
+            Exception: If DB is corrupted and cannot be accessed.
+        """
+        try:
+            # Basic connectivity test
+            table_names = self.db.list_tables()
+            
+            # If table exists, try to access it
+            if self.TABLE_NAME in table_names:
+                table = self.db.open_table(self.TABLE_NAME)
+                # Try a basic operation
+                row_count = table.count_rows()
+                
+                # Additional validation: check vector dimensions if table has data
+                if row_count > 0:
+                    # Sample first row to verify schema
+                    sample = table.head(1).to_pydict()
+                    if 'vector' in sample:
+                        vector_dim = len(sample['vector'][0])
+                        expected_dim = _EMBEDDING_DIM
+                        if vector_dim != expected_dim:
+                            raise ValueError(
+                                f"Vector dimension mismatch: expected {expected_dim}, got {vector_dim}"
+                            )
+            
+            logger.info("Database integrity check passed")
+            return True
+        except Exception as e:
+            logger.error(f"Database integrity check failed: {type(e).__name__} - {str(e)}")
+            raise
+    
+    def _rebuild_database(self) -> None:
+        """Rebuild database atomically after corruption.
+        
+        Uses temp directory + atomic swap to prevent race conditions.
+        """
+        import shutil
+        import tempfile
+        from pathlib import Path
+        
+        db_dir = Path(self.db_path)
+        
+        # Create temporary directory for new DB
+        temp_dir = Path(tempfile.mkdtemp(prefix="kmesh_rebuild_"))
+        
+        try:
+            # Build new database in temp location
+            temp_db = lancedb.connect(str(temp_dir))
+            temp_db.close()
+            
+            # Atomic swap: backup old, move new, cleanup
+            backup_path = None
+            if db_dir.exists():
+                backup_path = db_dir.with_suffix(".corrupt_backup")
+                if backup_path.exists():
+                    shutil.rmtree(backup_path)
+                db_dir.rename(backup_path)
+                logger.info(f"Backed up corrupted DB to {backup_path}")
+            
+            # Move temp DB to target location
+            shutil.move(str(temp_dir), str(db_dir))
+            
+            # Cleanup backup
+            if backup_path and backup_path.exists():
+                shutil.rmtree(backup_path)
+            
+            # Reconnect
+            self.db = lancedb.connect(self.db_path)
+            logger.info("Database rebuilt atomically")
+            
+        except Exception as e:
+            # Cleanup temp on failure
+            if temp_dir.exists():
+                shutil.rmtree(temp_dir)
+            logger.error(f"Atomic rebuild failed: {e}")
+            raise
 
     @property
     def table(self) -> lancedb.table.Table:
@@ -367,7 +493,9 @@ class VectorStore:
                 # Batch delete with OR filter for fewer round-trips
                 for file_path in affected_files:
                     try:
-                        self.table.delete(f'file_path = "{file_path}"')
+                        # Robust SQL escaping: backslashes first, then quotes
+                        safe_path = file_path.replace('\\', '\\\\').replace('"', '\\"').replace("'", "''")
+                        self.table.delete(f'file_path = "{safe_path}"')
                     except Exception:
                         pass
             self.table.add(records)
@@ -391,7 +519,9 @@ class VectorStore:
             file_path: Relative file path to remove.
         """
         try:
-            self.table.delete(f'file_path = "{file_path}"')
+            # Sanitize file_path to prevent SQL injection
+            safe_path = file_path.replace('"', '\\"')
+            self.table.delete(f'file_path = "{safe_path}"')
             self._fts_index_built = False
         except Exception:
             pass

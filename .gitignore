@@ -37,6 +37,8 @@ deleted/
 
 # Frankenreview artifacts
 .frankenreview/
+PLAN.md
+AGENTS.md
 
 # Test repo clones
 /tmp/kmesh_*

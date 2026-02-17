@@ -495,7 +495,8 @@ def parse_file(content: str, language: str, file_path: str) -> List[CodeChunk]:
     """Parse a source file into semantic code chunks.
 
     Uses Tree-sitter for supported languages, falls back to line-based
-    chunking for others.
+    chunking for others. Implements "Iron Stomach" pattern - handles
+    all errors gracefully without crashing.
 
     Args:
         content: Full file content as string.
@@ -504,43 +505,76 @@ def parse_file(content: str, language: str, file_path: str) -> List[CodeChunk]:
 
     Returns:
         List of CodeChunk objects representing semantic code units.
+        Returns empty list only if content is empty or all parsing fails.
+    
+    Raises:
+        Never raises - all errors are caught and logged.
     """
-    if not content.strip():
-        return []
-
-    ts_lang = language
-    # Normalize language name
-    if language == "jsx":
-        ts_lang = "javascript"
-    elif language == "tsx":
-        ts_lang = "tsx"
-
-    lang_obj = _get_language(ts_lang)
-    if lang_obj is None:
-        return _fallback_chunk(content, file_path, language)
-
-    parser = Parser(lang_obj)
-    source_bytes = content.encode("utf-8")
-
     try:
-        tree = parser.parse(source_bytes)
-    except Exception:
-        return _fallback_chunk(content, file_path, language)
+        if not content.strip():
+            return []
 
-    root = tree.root_node
+        ts_lang = language
+        # Normalize language name
+        if language == "jsx":
+            ts_lang = "javascript"
+        elif language == "tsx":
+            ts_lang = "tsx"
 
-    if ts_lang == "python":
-        chunks = _parse_python(root, source_bytes, file_path)
-    elif ts_lang in ("javascript", "typescript", "tsx"):
-        chunks = _parse_js_ts(root, source_bytes, file_path, language)
-    else:
-        chunks = _fallback_chunk(content, file_path, language)
+        lang_obj = _get_language(ts_lang)
+        if lang_obj is None:
+            return _fallback_chunk(content, file_path, language)
 
-    # If AST parsing produced no chunks (e.g. a config file), use fallback
-    if not chunks and content.strip():
-        chunks = _fallback_chunk(content, file_path, language)
+        parser = Parser(lang_obj)
+        
+        # Handle encoding issues
+        try:
+            source_bytes = content.encode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError) as e:
+            import logging
+            logger = logging.getLogger("kmesh.parser")
+            logger.warning(f"Encoding error in {file_path}: {str(e)}")
+            return _fallback_chunk(content, file_path, language)
 
-    return chunks
+        try:
+            tree = parser.parse(source_bytes)
+        except (Exception, RecursionError) as e:
+            import logging
+            logger = logging.getLogger("kmesh.parser")
+            logger.warning(f"Tree-sitter parse failed for {file_path}: {str(e)}")
+            return _fallback_chunk(content, file_path, language)
+
+        root = tree.root_node
+
+        if ts_lang == "python":
+            chunks = _parse_python(root, source_bytes, file_path)
+        elif ts_lang in ("javascript", "typescript", "tsx"):
+            chunks = _parse_js_ts(root, source_bytes, file_path, language)
+        else:
+            chunks = _fallback_chunk(content, file_path, language)
+
+        # If AST parsing produced no chunks (e.g. a config file), use fallback
+        if not chunks and content.strip():
+            chunks = _fallback_chunk(content, file_path, language)
+
+        return chunks
+        
+    except (MemoryError, RecursionError) as e:
+        # Critical errors - file too large or deeply nested
+        import logging
+        logger = logging.getLogger("kmesh.parser")
+        logger.error(f"Critical parser error for {file_path}: {type(e).__name__} - {str(e)}")
+        return []
+    except Exception as e:
+        # Catch-all for any unexpected errors
+        import logging
+        logger = logging.getLogger("kmesh.parser")
+        logger.error(f"Unexpected parser error for {file_path}: {type(e).__name__} - {str(e)}")
+        # Try fallback as last resort
+        try:
+            return _fallback_chunk(content, file_path, language)
+        except Exception:
+            return []
 
 
 def get_file_skeleton(content: str, language: str, file_path: str) -> str:

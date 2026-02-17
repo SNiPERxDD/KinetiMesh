@@ -236,7 +236,7 @@ def get_index_stats() -> str:
     """Get statistics about the current index state.
 
     Returns information about indexed files, chunks, performance metrics,
-    and watcher status.
+    watcher status, and failed files.
 
     Returns:
         Formatted statistics about the KinetiMesh index.
@@ -245,12 +245,136 @@ def get_index_stats() -> str:
     stats = pipeline.get_stats()
 
     lines = ["KinetiMesh Index Stats:"]
-    for k, v in stats.items():
-        if isinstance(v, float):
-            lines.append(f"  {k}: {v:.2f}")
-        else:
-            lines.append(f"  {k}: {v}")
+    
+    # Core metrics
+    lines.append(f"  repo_path: {stats.get('repo_path', 'N/A')}")
+    lines.append(f"  total_indexed_files: {stats.get('total_indexed_files', 0)}")
+    lines.append(f"  total_indexed_chunks: {stats.get('total_indexed_chunks', 0)}")
+    lines.append(f"  total_stored_chunks: {stats.get('total_stored_chunks', 0)}")
+    lines.append(f"  tracked_files: {stats.get('tracked_files', 0)}")
+    lines.append(f"  watcher_active: {stats.get('watcher_active', False)}")
+    
+    # Performance metrics
+    lines.append(f"  last_full_index_ms: {stats.get('last_full_index_ms', 0):.2f}")
+    lines.append(f"  last_incremental_ms: {stats.get('last_incremental_ms', 0):.2f}")
+    
+    # Failed files
+    failed_count = stats.get('failed_files_count', 0)
+    lines.append(f"  failed_files_count: {failed_count}")
+    
+    if failed_count > 0:
+        lines.append("\nRecent Failed Files:")
+        recent_failures = stats.get('recent_failures', [])
+        for fail in recent_failures[:10]:  # Show max 10
+            lines.append(f"  - {fail.get('file', 'unknown')}: {fail.get('error', 'unknown error')[:100]}")
+        if failed_count > 10:
+            lines.append(f"  ... and {failed_count - 10} more")
 
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def doctor() -> str:
+    """Run comprehensive system diagnostics.
+    
+    Checks:
+    - Database integrity
+    - Write permissions
+    - Memory usage estimates
+    - Failed/poison files
+    - Index health
+    
+    Returns:
+        Diagnostic report with health status and recommendations.
+    """
+    pipeline = _get_pipeline()
+    
+    lines = ["="*60]
+    lines.append("KinetiMesh System Diagnostics")
+    lines.append("="*60)
+    
+    # 1. Database Health
+    lines.append("\n[1] Database Health:")
+    try:
+        stats = pipeline.store.get_stats()
+        db_path = stats.get('db_path', 'unknown')
+        lines.append(f"  ✓ Database path: {db_path}")
+        lines.append(f"  ✓ Total chunks: {stats.get('total_chunks', 0)}")
+        lines.append("  ✓ Database accessible")
+    except Exception as e:
+        lines.append(f"  ✗ Database error: {str(e)}")
+    
+    # 2. Write Permissions
+    lines.append("\n[2] Write Permissions:")
+    import os
+    from pathlib import Path
+    try:
+        kmesh_dir = Path(".kmesh")
+        if kmesh_dir.exists():
+            test_file = kmesh_dir / ".write_test"
+            test_file.write_text("test")
+            test_file.unlink()
+            lines.append("  ✓ .kmesh directory writable")
+        else:
+            lines.append("  ⚠ .kmesh directory does not exist")
+    except Exception as e:
+        lines.append(f"  ✗ Write permission error: {str(e)}")
+    
+    # 3. Memory Usage Estimate
+    lines.append("\n[3] Resource Usage:")
+    try:
+        import psutil
+        import os
+        process = psutil.Process(os.getpid())
+        mem_mb = process.memory_info().rss / 1024 / 1024
+        lines.append(f"  Memory usage: {mem_mb:.1f} MB")
+    except ImportError:
+        lines.append("  ⚠ psutil not available for memory checks")
+    except Exception as e:
+        lines.append(f"  ⚠ Could not check memory: {str(e)}")
+    
+    # 4. Failed Files
+    lines.append("\n[4] Failed Files:")
+    pipeline_stats = pipeline.get_stats()
+    failed_count = pipeline_stats.get('failed_files_count', 0)
+    lines.append(f"  Total failed files: {failed_count}")
+    
+    if failed_count > 0:
+        lines.append("\n  Recent failures:")
+        recent = pipeline_stats.get('recent_failures', [])
+        for fail in recent[:5]:  # Show max 5 in doctor
+            stage = fail.get('stage', 'unknown')
+            file = fail.get('file', 'unknown')
+            error = fail.get('error', 'unknown')[:80]
+            lines.append(f"    [{stage}] {file}: {error}")
+        
+        if failed_count > 5:
+            lines.append(f"    ... and {failed_count - 5} more (see get_index_stats for full list)")
+    else:
+        lines.append("  ✓ No failed files")
+    
+    # 5. Index Health
+    lines.append("\n[5] Index Health:")
+    watcher_active = pipeline_stats.get('watcher_active', False)
+    lines.append(f"  File watcher: {'✓ Active' if watcher_active else '✗ Inactive'}")
+    
+    tracked = pipeline_stats.get('tracked_files', 0)
+    indexed = pipeline_stats.get('total_indexed_files', 0)
+    lines.append(f"  Tracked files: {tracked}")
+    lines.append(f"  Indexed files: {indexed}")
+    
+    # 6. Recommendations
+    lines.append("\n[6] Recommendations:")
+    if failed_count > 10:
+        lines.append("  ⚠ High number of failed files detected")
+        lines.append("    Consider checking file encodings or size limits")
+    if not watcher_active:
+        lines.append("  ⚠ File watcher is inactive")
+        lines.append("    Run start_watcher() to enable live updates")
+    if failed_count == 0 and watcher_active:
+        lines.append("  ✓ All systems healthy")
+    
+    lines.append("\n" + "="*60)
     return "\n".join(lines)
 
 
