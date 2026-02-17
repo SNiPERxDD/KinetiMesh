@@ -1,5 +1,33 @@
 # CHANGELOG
 
+## [0.6.0] - 2026-02-17T18:30:00+05:30
+
+### Internal Python Wrapper - Direct API Access
+
+Enabled direct Python imports for all KinetiMesh MCP tools, eliminating command-line dependency for internal use by AI agents.
+
+#### Files Created
+- `src/mcp_wrapper.py` (535 lines) - Thread-safe singleton wrapper with 7 public functions: `init_kinetimesh()`, `search_code_internal()`, `get_file_structure_internal()`, `find_related_internal()`, `get_index_stats_internal()`, `doctor_internal()`, `shutdown_kinetimesh()`
+- `src/INTERNAL_USAGE.md` (366 lines) - Complete API reference with examples, thread-safety patterns, error handling
+- `tests/test_internal_wrapper.py` (220 lines, 7 test cases) - Full wrapper test coverage including concurrent access
+
+#### Files Modified
+- `src/db/store.py`: 
+  - L415: Fixed deprecation (`table_names()` → `list_tables()`)
+  - L489-497: Added race condition handling for table creation (drop-retry pattern)
+
+#### Verification
+- Tests: 59/59 PASSED (7 new + 52 regression)
+- Performance: Init 16.6s, search 62ms avg, 672 chunks indexed
+- Audit: Zero path leaks, zero data leaks, AGENTS.md compliant
+
+#### Usage
+```python
+from src.mcp_wrapper import init_kinetimesh, search_code_internal
+init_kinetimesh(".")
+results = search_code_internal("query", top_k=5)
+```
+
 ## [0.5.0] - 2026-02-17T11:30:00+05:30
 
 ### Production Hardening: Error Handling & Resilience
@@ -125,6 +153,12 @@ Comprehensive error handling and robustness improvements based on frankenreview 
 #### Iterative Convergence - Cycle 7 (2026-02-17T12:54:00+05:30)
 **Storm Mode Hardening:**
 - `src/server/pipeline.py`: Implemented max storm duration cap (30s) - prevents indefinite postponement from continuous events
+
+#### Iterative Convergence - Cycle 8 (2026-02-17T18:15:00+05:30)
+**Stability & Read-Only Resilience:**
+- `src/server/mcp_server.py`: **[CRITICAL]** Implemented storage fallbacks; pivots to `~/.kmesh` if repo root is read-only.
+- `src/server/mcp_server.py`: Deferred logging initialization to prevent startup crashes.
+- `src/server/mcp_server.py`: Fixed invalid docstring reference to `start` command.
 
 #### Files Modified (Post-Review)
 

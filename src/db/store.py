@@ -415,6 +415,7 @@ class VectorStore:
             table_names = self.db.list_tables()
             if self.TABLE_NAME in table_names:
                 self._table = self.db.open_table(self.TABLE_NAME)
+                logger.info(f"Opened existing table: {self.TABLE_NAME}")
             else:
                 self._table = self.db.create_table(
                     self.TABLE_NAME,
@@ -485,7 +486,15 @@ class VectorStore:
             except Exception:
                 pass
             self._table = None
-            self._table = self.db.create_table(self.TABLE_NAME, data=records, schema=CODE_CHUNK_SCHEMA)
+            try:
+                self._table = self.db.create_table(self.TABLE_NAME, data=records, schema=CODE_CHUNK_SCHEMA)
+            except ValueError as e:
+                if "already exists" in str(e):
+                    # Race condition: drop and retry
+                    self.db.drop_table(self.TABLE_NAME)
+                    self._table = self.db.create_table(self.TABLE_NAME, data=records, schema=CODE_CHUNK_SCHEMA)
+                else:
+                    raise
         else:
             # Incremental: delete affected files then batch insert
             affected_files = list(file_chunks.keys())
