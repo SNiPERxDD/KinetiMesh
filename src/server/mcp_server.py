@@ -150,7 +150,8 @@ def search_code(query: str, top_k: int = 5) -> str:
     Priority-weighted scoring automatically boosts function signatures
     and class definitions over raw code blocks.
 
-    FlashRank re-ranking is disabled by default for speed (<15ms latency).
+    Search latency: ~50-100ms (instant - no waiting needed).
+    FlashRank re-ranking is disabled by default for speed.
     Benchmarked: 100% Top-3 accuracy without reranking vs 83% with.
 
     Args:
@@ -161,7 +162,7 @@ def search_code(query: str, top_k: int = 5) -> str:
 
     Returns:
         Formatted search results with file paths, symbol names, code snippets,
-        and relevance scores.
+        and relevance scores. Parse the output to extract file paths and line numbers.
     """
     pipeline = _get_pipeline()
     top_k = min(max(top_k, 1), 20)

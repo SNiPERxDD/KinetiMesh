@@ -36,6 +36,10 @@ _global_lock = threading.RLock()
 def init_kinetimesh(repo_path: str, db_path: str = ".kmesh/data") -> Dict[str, Any]:
     """Initialize the KinetiMesh pipeline for internal use.
 
+    IMPORTANT: This function performs a full codebase scan and may take 10-30 seconds
+    for medium repositories (1000+ files). This is NOT instant. The tool is working
+    correctly - wait for the returned metrics dict.
+
     This function initializes the global pipeline instance that will be used
     by all internal tool functions. It performs initial indexing and starts
     the file watcher.
@@ -46,13 +50,15 @@ def init_kinetimesh(repo_path: str, db_path: str = ".kmesh/data") -> Dict[str, A
                  Relative paths are resolved relative to repo_path.
 
     Returns:
-        Dict with initialization metrics:
+        Dict (JSON-serializable) with initialization metrics:
             - status: "ready" if successful
             - repo_path: Absolute path to repository
             - init_time_ms: Initialization time in milliseconds
             - files_scanned: Number of files scanned
             - chunks_parsed: Number of code chunks parsed
             - total_time_ms: Total indexing time
+
+        The return value is a dict/JSON object, NOT a string. You can parse it directly.
 
     Raises:
         RuntimeError: If pipeline initialization fails.
@@ -134,6 +140,7 @@ def search_code_internal(query: str, top_k: int = 5) -> str:
 
     Performs semantic search across all indexed source files, combining
     vector similarity (sentence-transformers) with BM25 keyword matching.
+    Search latency: ~50-100ms (instant - no waiting needed).
 
     Args:
         query: Natural language query describing the code you're looking for.
@@ -143,7 +150,8 @@ def search_code_internal(query: str, top_k: int = 5) -> str:
 
     Returns:
         Formatted string with search results including file paths, symbol names,
-        code snippets, and relevance scores.
+        code snippets, and relevance scores. Parse the output to extract file paths
+        and line numbers for further investigation.
 
     Raises:
         RuntimeError: If pipeline is not initialized.
